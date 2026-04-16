@@ -1,49 +1,62 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
+  const [apiPort, setApiPort] = useState<number | null>(null);
+  const [apiResponse, setApiResponse] = useState("");
   const [name, setName] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  // アプリ起動時に FastAPI のポート番号を取得
+  useEffect(() => {
+    invoke<number>("get_api_port").then(setApiPort);
+  }, []);
+
+  async function callFastApi() {
+    if (!apiPort || !name) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`http://127.0.0.1:${apiPort}/hello/${encodeURIComponent(name)}`);
+      const data = await res.json();
+      setApiResponse(data.message);
+    } catch (e) {
+      setApiResponse(`Error: ${e}`);
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
     <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+      <h1>Tauri + FastAPI</h1>
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
+      <p>
+        Backend status:{" "}
+        {apiPort ? (
+          <span style={{ color: "green" }}>Running on port {apiPort}</span>
+        ) : (
+          <span style={{ color: "gray" }}>Loading...</span>
+        )}
+      </p>
 
       <form
         className="row"
         onSubmit={(e) => {
           e.preventDefault();
-          greet();
+          callFastApi();
         }}
       >
         <input
-          id="greet-input"
           onChange={(e) => setName(e.currentTarget.value)}
           placeholder="Enter a name..."
         />
-        <button type="submit">Greet</button>
+        <button type="submit" disabled={loading || !apiPort}>
+          {loading ? "..." : "Call FastAPI"}
+        </button>
       </form>
-      <p>{greetMsg}</p>
+
+      {apiResponse && <p>{apiResponse}</p>}
     </main>
   );
 }

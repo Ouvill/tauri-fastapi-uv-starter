@@ -1,3 +1,12 @@
+# Python
+python/.venv
+python/__pycache__
+python/*.pyc
+
+# uv / venv (downloaded binaries and generated environments)
+src-tauri/resources/uv
+src-tauri/resources/uv.exe
+
 # Logs
 logs
 *.log
