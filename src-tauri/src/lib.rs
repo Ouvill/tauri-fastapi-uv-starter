@@ -4,16 +4,31 @@ use tauri::{AppHandle, Manager};
 
 pub const FASTAPI_PORT: u16 = 8000;
 
-/// アプリ状態：FastAPI サブプロセスを保持
-/// Drop 時に kill するので、アプリ終了時に自動クリーンアップされる
-pub struct BackendProcess(Option<Child>);
+/// アプリ状態：FastAPI サブプロセスと（Windows では）Job Object を保持
+pub struct BackendProcess {
+    child: Option<Child>,
+    /// ハンドルを保持し続けることで Drop 時に OS が KILL_ON_JOB_CLOSE を発火する
+    #[cfg(windows)]
+    _job: Option<win32job::Job>,
+}
+
+impl BackendProcess {
+    fn none() -> Self {
+        BackendProcess {
+            child: None,
+            #[cfg(windows)]
+            _job: None,
+        }
+    }
+}
 
 impl Drop for BackendProcess {
     fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
+        // Windows: ここで _job が Drop → OS がプロセスツリー全体を kill
     }
 }
 
@@ -27,10 +42,46 @@ fn uv_path(resource_dir: &std::path::Path) -> std::path::PathBuf {
     return resource_dir.join("uv");
 }
 
+/// Windows Job Object を作成して子プロセスをアタッチする。
+/// KILL_ON_JOB_CLOSE を設定することで、Tauri プロセスが終了すると
+/// OS がジョブ内の全プロセスを自動 kill する。
+#[cfg(windows)]
+fn attach_job_object(child: &Child) -> Option<win32job::Job> {
+    use std::os::windows::io::AsRawHandle;
+
+    let job = match win32job::Job::create() {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("[backend] Job::create failed: {e}");
+            return None;
+        }
+    };
+
+    let mut info = match job.query_extended_limit_info() {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("[backend] query_extended_limit_info failed: {e}");
+            return None;
+        }
+    };
+    info.limit_kill_on_job_close();
+    if let Err(e) = job.set_extended_limit_info(&mut info) {
+        eprintln!("[backend] set_extended_limit_info failed: {e}");
+        return None;
+    }
+
+    let raw = child.as_raw_handle() as isize;
+    if let Err(e) = job.assign_process(raw) {
+        eprintln!("[backend] assign_process failed: {e}");
+        return None;
+    }
+
+    println!("[backend] Job Object attached (KILL_ON_JOB_CLOSE, pid={})", child.id());
+    Some(job)
+}
+
 /// FastAPI サーバーを起動する
-/// - uv run で依存関係を自動解決してから uvicorn を起動
-/// - venv は app_local_data_dir に作成（インストール先が読み取り専用でも動作）
-fn start_backend(app: &AppHandle) -> Result<Child, String> {
+fn start_backend(app: &AppHandle) -> Result<BackendProcess, String> {
     let resource_dir = app
         .path()
         .resource_dir()
@@ -50,8 +101,6 @@ fn start_backend(app: &AppHandle) -> Result<Child, String> {
         return Err(format!("python ディレクトリが見つかりません: {}", python_dir.display()));
     }
 
-    // venv の保存先（リリースビルドではリソースが読み取り専用になりうるため
-    // app_local_data_dir に置く）
     let venv_dir = {
         #[cfg(debug_assertions)]
         {
@@ -70,7 +119,6 @@ fn start_backend(app: &AppHandle) -> Result<Child, String> {
     println!("[backend] python_dir: {}", python_dir.display());
     println!("[backend] venv: {}", venv_dir.display());
 
-    // uv run が依存関係のインストール＋uvicorn の起動を一括で行う
     let child = std::process::Command::new(&uv)
         .env("UV_PROJECT_ENVIRONMENT", &venv_dir)
         .args([
@@ -88,10 +136,14 @@ fn start_backend(app: &AppHandle) -> Result<Child, String> {
         .map_err(|e| format!("FastAPI 起動失敗: {e}"))?;
 
     println!("[backend] FastAPI started (pid={})", child.id());
-    Ok(child)
+
+    Ok(BackendProcess {
+        child: Some(child),
+        #[cfg(windows)]
+        _job: attach_job_object(&child),
+    })
 }
 
-/// フロントエンドから API ポート番号を取得するコマンド
 #[tauri::command]
 fn get_api_port() -> u16 {
     FASTAPI_PORT
@@ -106,16 +158,15 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(Mutex::new(BackendProcess(None)) as BackendState)
+        .manage(Mutex::new(BackendProcess::none()) as BackendState)
         .setup(|app| {
             match start_backend(app.handle()) {
-                Ok(child) => {
-                    *app.state::<BackendState>().lock().unwrap() = BackendProcess(Some(child));
+                Ok(backend) => {
+                    *app.state::<BackendState>().lock().unwrap() = backend;
                     println!("[backend] FastAPI is running on http://127.0.0.1:{FASTAPI_PORT}");
                 }
                 Err(e) => {
                     eprintln!("[backend] ERROR: {e}");
-                    // 起動失敗してもアプリは続行（API 呼び出し時にエラーになる）
                 }
             }
             Ok(())

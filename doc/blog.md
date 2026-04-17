@@ -187,14 +187,20 @@ use tauri::{AppHandle, Manager};
 
 pub const FASTAPI_PORT: u16 = 8000;
 
-pub struct BackendProcess(Option<Child>);
+pub struct BackendProcess {
+    child: Option<Child>,
+    /// ハンドルを保持し続けることで Drop 時に OS が KILL_ON_JOB_CLOSE を発火する
+    #[cfg(windows)]
+    _job: Option<win32job::Job>,
+}
 
 impl Drop for BackendProcess {
     fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
+        // Windows: ここで _job が Drop → OS がプロセスツリー全体を kill
     }
 }
 
@@ -203,17 +209,47 @@ pub type BackendState = Mutex<BackendProcess>;
 
 `Drop` トレイトの実装がポイントだ。`BackendState` がアプリ終了時に破棄されると `Drop::drop` が呼ばれ、FastAPI プロセスが自動的に kill される。`on_window_event` でクリーンアップを書く必要がなく、Rust らしい RAII パターンで安全に後処理できる。
 
+### Windows でのプロセスツリー終了問題
+
+`child.kill()` だけでは Windows で問題が生じる。`uv run uvicorn` は `uv.exe` → `python.exe` という**孫プロセス**を生成するため、`child.kill()` で `uv.exe` を止めても `python.exe` が残り続ける。また `Drop` はクリーンな終了時にしか実行が保証されず、強制終了やクラッシュ時には呼ばれない場合がある。
+
+解決策は **Windows Job Object** だ。`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` フラグを設定したジョブに子プロセスをアタッチしておくと、Tauri プロセスが終了してジョブのハンドルが閉じられた瞬間に、OS がジョブ内のプロセスツリー全体を kill する。これはカーネルが保証する動作なので、クラッシュや `taskkill /F` でも確実に機能する。
+
+`Cargo.toml` に Windows 専用依存として追加する:
+
+```toml
+[target.'cfg(windows)'.dependencies]
+win32job = "2"
+```
+
+`attach_job_object` 関数の実装:
+
+```rust
+#[cfg(windows)]
+fn attach_job_object(child: &Child) -> Option<win32job::Job> {
+    use std::os::windows::io::AsRawHandle;
+
+    let job = win32job::Job::create().ok()?;
+
+    let mut info = job.query_extended_limit_info().ok()?;
+    info.limit_kill_on_job_close();
+    job.set_extended_limit_info(&mut info).ok()?;
+
+    let raw = child.as_raw_handle() as isize;
+    job.assign_process(raw).ok()?;
+
+    Some(job)
+}
+```
+
+`BackendProcess` の `_job` フィールドがこのジョブのハンドルを保持する。`BackendProcess` が Drop されるとハンドルが閉じられ、OS がプロセスツリーを kill する。フィールドを「持っているだけ」で仕事をするのが RAII らしい設計だ。
+
 次に起動ロジック:
 
 ```rust
-fn start_backend(app: &AppHandle) -> Result<Child, String> {
+fn start_backend(app: &AppHandle) -> Result<BackendProcess, String> {
     let resource_dir = app.path().resource_dir()
         .map_err(|e| format!("resource_dir 取得失敗: {e}"))?;
-
-    #[cfg(target_os = "windows")]
-    let uv = resource_dir.join("uv.exe");
-    #[cfg(not(target_os = "windows"))]
-    let uv = resource_dir.join("uv");
 
     let python_dir = resource_dir.join("python");
 
@@ -231,7 +267,7 @@ fn start_backend(app: &AppHandle) -> Result<Child, String> {
         }
     };
 
-    let child = std::process::Command::new(&uv)
+    let child = std::process::Command::new(uv_path(&resource_dir))
         .env("UV_PROJECT_ENVIRONMENT", &venv_dir)
         .args([
             "run", "uvicorn", "main:app",
@@ -243,7 +279,11 @@ fn start_backend(app: &AppHandle) -> Result<Child, String> {
         .spawn()
         .map_err(|e| format!("FastAPI 起動失敗: {e}"))?;
 
-    Ok(child)
+    Ok(BackendProcess {
+        child: Some(child),
+        #[cfg(windows)]
+        _job: attach_job_object(&child),
+    })
 }
 ```
 
@@ -260,11 +300,11 @@ fn get_api_port() -> u16 {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(Mutex::new(BackendProcess(None)) as BackendState)
+        .manage(Mutex::new(BackendProcess::none()) as BackendState)
         .setup(|app| {
             match start_backend(app.handle()) {
-                Ok(child) => {
-                    *app.state::<BackendState>().lock().unwrap() = BackendProcess(Some(child));
+                Ok(backend) => {
+                    *app.state::<BackendState>().lock().unwrap() = backend;
                 }
                 Err(e) => eprintln!("[backend] ERROR: {e}"),
             }
@@ -350,7 +390,8 @@ npm run tauri build
 | Python 環境をユーザーに要求したくない | uv バイナリをアプリに同梱 |
 | venv の作成場所が書き込み不可になりうる | `UV_PROJECT_ENVIRONMENT` で書き込み可能パスに誘導 |
 | git clone 後すぐ開発を始めたい | `build.rs` で uv を自動ダウンロード |
-| アプリ終了時に FastAPI を確実に止めたい | `Drop` トレイトで RAII パターン |
+| アプリ終了時に FastAPI を確実に止めたい（macOS/Linux） | `Drop` トレイトで RAII パターン |
+| Windows で孫プロセス（python.exe）が残る | Windows Job Object で OS レベルのプロセスツリー kill |
 | プラットフォームごとに uv バイナリが異なる | `tauri.{platform}.conf.json` で分岐 |
 
 Tauri + Rust + FastAPI という組み合わせは一見複雑に見えるが、実装してみると意外とシンプルに整理できる。Python の豊富なエコシステムを Tauri アプリから活用したい場合の参考になれば幸いだ。
