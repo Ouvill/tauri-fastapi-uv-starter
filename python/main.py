@@ -5,12 +5,14 @@ app = FastAPI(title="Tauri FastAPI Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    # Limit origins so arbitrary websites cannot call localhost APIs.
+    # Allow Tauri app origins and local dev origins on any port.
+    # CORS checks the request Origin (frontend), not backend API port.
     allow_origins=[
         "tauri://localhost",
-        "http://localhost:1420",
-        "http://127.0.0.1:1420",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
     ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
