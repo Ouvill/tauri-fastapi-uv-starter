@@ -55,6 +55,7 @@ npm run tauri build
 | プラットフォームごとに uv バイナリが異なる | `tauri.{platform}.conf.json` で分岐 |
 | 起動失敗時に UI で気付きにくい | `is_backend_running` コマンドで起動状態を表示 |
 | ポート競合が起きる | 起動時に `127.0.0.1:0` で空きポートを自動確保 |
+| 初回起動が遅い | 起動時に `uv sync --locked` を明示実行し、UI にセットアップ進捗を表示 |
 
 ## 参考
 

@@ -2,22 +2,54 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
+type BootstrapStatus = {
+  phase: string;
+  message: string;
+};
+
 function App() {
   const [apiPort, setApiPort] = useState<number | null>(null);
   const [backendRunning, setBackendRunning] = useState<boolean | null>(null);
+  const [bootstrapStatus, setBootstrapStatus] = useState<BootstrapStatus>({
+    phase: "initializing",
+    message: "Preparing Python environment...",
+  });
   const [apiResponse, setApiResponse] = useState("");
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // アプリ起動時に FastAPI のポート番号を取得
+  // 起動時にバックエンド準備状態をポーリング
   useEffect(() => {
-    invoke<number | null>("get_api_port")
-      .then(setApiPort)
-      .catch(() => setApiPort(null));
+    let cancelled = false;
 
-    invoke<boolean>("is_backend_running")
-      .then(setBackendRunning)
-      .catch(() => setBackendRunning(false));
+    const refresh = async () => {
+      try {
+        const status = await invoke<BootstrapStatus>("get_backend_bootstrap_status");
+        const running = await invoke<boolean>("is_backend_running");
+        const port = await invoke<number | null>("get_api_port");
+        if (!cancelled) {
+          setBootstrapStatus(status);
+          setBackendRunning(running);
+          setApiPort(port);
+        }
+      } catch (_e) {
+        if (!cancelled) {
+          setBootstrapStatus({
+            phase: "failed",
+            message: "Failed to query backend status.",
+          });
+          setBackendRunning(false);
+          setApiPort(null);
+        }
+      }
+    };
+
+    refresh();
+    const timerId = window.setInterval(refresh, 1200);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timerId);
+    };
   }, []);
 
   async function callFastApi() {
@@ -43,8 +75,10 @@ function App() {
 
       <p>
         Backend status:{" "}
-        {backendRunning === null ? (
-          <span style={{ color: "gray" }}>Checking...</span>
+        {bootstrapStatus.phase === "syncing" || bootstrapStatus.phase === "starting" || bootstrapStatus.phase === "initializing" ? (
+          <span style={{ color: "gray" }}>{bootstrapStatus.message}</span>
+        ) : bootstrapStatus.phase === "failed" ? (
+          <span style={{ color: "red" }}>{bootstrapStatus.message}</span>
         ) : backendRunning ? (
           <span style={{ color: "green" }}>
             {apiPort !== null ? `Running on port ${apiPort}` : "Running"}
