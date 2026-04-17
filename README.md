@@ -1,4 +1,4 @@
-# tauri-fastapi-uv-sandbox
+# tauri-fastapi-uv-starter
 
 Tauri + uv + FastAPI のサイドカーパターンのサンプルコード。
 

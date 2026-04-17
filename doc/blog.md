@@ -42,7 +42,7 @@ Tauri に同梱するバイナリとして非常に扱いやすい。
 ## プロジェクト構成
 
 ```
-tauri-fastapi-uv-sandbox/
+tauri-fastapi-uv-starter/
 ├── python/
 │   ├── pyproject.toml       # FastAPI/uvicorn の依存関係
 │   └── main.py              # FastAPI アプリ本体
@@ -444,4 +444,4 @@ Tauri + Rust + FastAPI という組み合わせは一見複雑に見えるが、
 
 ---
 
-サンプルコードは [GitHub](https://github.com/Ouvill/tauri-fastapi-uv-sandbox) で公開している。
+サンプルコードは [GitHub](https://github.com/Ouvill/tauri-fastapi-uv-starter) で公開している。

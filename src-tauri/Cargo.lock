@@ -3707,7 +3707,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tauri-fastapi-uv-sandbox"
+name = "tauri-fastapi-uv-starter"
 version = "0.1.0"
 dependencies = [
  "serde",
