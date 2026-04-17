@@ -26,12 +26,38 @@ switch ($Arch.ToUpperInvariant()) {
     default { $Triple = "x86_64-pc-windows-msvc" }
 }
 
-$Url = "https://github.com/astral-sh/uv/releases/download/$Version/uv-$Triple.zip"
+$AssetName = "uv-$Triple.zip"
+$BaseUrl = "https://github.com/astral-sh/uv/releases/download/$Version"
+$Url = "$BaseUrl/$AssetName"
+$ChecksumUrl = "$BaseUrl/SHA256SUMS"
 $TmpZip = [System.IO.Path]::GetTempFileName() + ".zip"
+$TmpChecksums = [System.IO.Path]::GetTempFileName()
 $TmpDir = [System.IO.Path]::GetTempPath() + [System.IO.Path]::GetRandomFileName()
 
 Write-Host "Downloading uv $Version from $Url ..."
 Invoke-WebRequest -Uri $Url -OutFile $TmpZip -UseBasicParsing
+
+Write-Host "Downloading checksums from $ChecksumUrl ..."
+Invoke-WebRequest -Uri $ChecksumUrl -OutFile $TmpChecksums -UseBasicParsing
+
+$ExpectedLine = Select-String -Path $TmpChecksums -Pattern ("\s" + [regex]::Escape($AssetName) + "$") | Select-Object -First 1
+if (-not $ExpectedLine) {
+    Remove-Item $TmpZip -Force -ErrorAction SilentlyContinue
+    Remove-Item $TmpChecksums -Force -ErrorAction SilentlyContinue
+    throw "Could not find checksum entry for $AssetName in SHA256SUMS"
+}
+
+$ExpectedHash = ($ExpectedLine.Line -split "\s+")[0].ToLowerInvariant()
+$ActualHash = (Get-FileHash -Path $TmpZip -Algorithm SHA256).Hash.ToLowerInvariant()
+
+if ($ExpectedHash -ne $ActualHash) {
+    Remove-Item $TmpZip -Force -ErrorAction SilentlyContinue
+    Remove-Item $TmpChecksums -Force -ErrorAction SilentlyContinue
+    throw "SHA256 mismatch for $AssetName. expected=$ExpectedHash actual=$ActualHash"
+}
+
+Write-Host "Checksum verified for $AssetName"
+Remove-Item $TmpChecksums -Force
 
 Write-Host "Extracting..."
 Expand-Archive -Path $TmpZip -DestinationPath $TmpDir -Force

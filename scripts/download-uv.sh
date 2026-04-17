@@ -40,11 +40,49 @@ case "$OS" in
         echo "Unsupported OS: $OS"; exit 1 ;;
 esac
 
-URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$TRIPLE.tar.gz"
+ASSET_NAME="uv-$TRIPLE.tar.gz"
+BASE_URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION"
+URL="$BASE_URL/$ASSET_NAME"
+CHECKSUM_URL="$BASE_URL/SHA256SUMS"
 TMP_DIR="$(mktemp -d)"
+TMP_ARCHIVE="$TMP_DIR/$ASSET_NAME"
+TMP_CHECKSUMS="$TMP_DIR/SHA256SUMS"
 
 echo "Downloading uv $UV_VERSION for $TRIPLE ..."
-curl -fsSL "$URL" | tar -xz -C "$TMP_DIR"
+curl -fsSL "$URL" -o "$TMP_ARCHIVE"
+
+echo "Downloading checksums ..."
+curl -fsSL "$CHECKSUM_URL" -o "$TMP_CHECKSUMS"
+
+EXPECTED_HASH="$(grep "  $ASSET_NAME$" "$TMP_CHECKSUMS" | awk '{print $1}')"
+if [[ -z "$EXPECTED_HASH" ]]; then
+    echo "Failed to find checksum entry for $ASSET_NAME"
+    rm -rf "$TMP_DIR"
+    exit 1
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL_HASH="$(sha256sum "$TMP_ARCHIVE" | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL_HASH="$(shasum -a 256 "$TMP_ARCHIVE" | awk '{print $1}')"
+elif command -v openssl >/dev/null 2>&1; then
+    ACTUAL_HASH="$(openssl dgst -sha256 "$TMP_ARCHIVE" | awk '{print $2}')"
+else
+    echo "No SHA256 tool found (sha256sum/shasum/openssl)"
+    rm -rf "$TMP_DIR"
+    exit 1
+fi
+
+if [[ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]]; then
+    echo "SHA256 mismatch for $ASSET_NAME"
+    echo "expected=$EXPECTED_HASH"
+    echo "actual=$ACTUAL_HASH"
+    rm -rf "$TMP_DIR"
+    exit 1
+fi
+
+echo "Checksum verified for $ASSET_NAME"
+tar -xzf "$TMP_ARCHIVE" -C "$TMP_DIR"
 
 # Archive extracts to uv-$TRIPLE/uv
 cp "$TMP_DIR/uv-$TRIPLE/uv" "$DEST"
