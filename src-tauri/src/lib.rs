@@ -2,11 +2,10 @@ use std::process::Child;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
-pub const FASTAPI_PORT: u16 = 8000;
-
 /// アプリ状態：FastAPI サブプロセスと（Windows では）Job Object を保持
 pub struct BackendProcess {
     child: Option<Child>,
+    port: Option<u16>,
     /// ハンドルを保持し続けることで Drop 時に OS が KILL_ON_JOB_CLOSE を発火する
     #[cfg(windows)]
     _job: Option<win32job::Job>,
@@ -16,6 +15,7 @@ impl BackendProcess {
     fn none() -> Self {
         BackendProcess {
             child: None,
+            port: None,
             #[cfg(windows)]
             _job: None,
         }
@@ -28,6 +28,7 @@ impl Drop for BackendProcess {
             let _ = child.kill();
             let _ = child.wait();
         }
+        self.port = None;
         // Windows: ここで _job が Drop → OS がプロセスツリー全体を kill
     }
 }
@@ -40,6 +41,37 @@ fn uv_path(resource_dir: &std::path::Path) -> std::path::PathBuf {
     return resource_dir.join("uv.exe");
     #[cfg(not(target_os = "windows"))]
     return resource_dir.join("uv");
+}
+
+/// 127.0.0.1 上の空きポートを動的に確保する。
+fn allocate_backend_port() -> Result<u16, String> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("空きポート確保に失敗: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("確保ポート取得に失敗: {e}"))?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+fn refresh_backend_state(backend: &mut BackendProcess) -> bool {
+    if let Some(child) = backend.child.as_mut() {
+        match child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_status)) => {
+                backend.child = None;
+                backend.port = None;
+                false
+            }
+            Err(e) => {
+                eprintln!("[backend] try_wait failed: {e}");
+                false
+            }
+        }
+    } else {
+        false
+    }
 }
 
 /// Windows Job Object を作成して子プロセスをアタッチする。
@@ -57,15 +89,16 @@ fn attach_job_object(child: &Child) -> Option<win32job::Job> {
         }
     };
 
-    let mut info = match job.query_extended_limit_info() {
+    let info = match job.query_extended_limit_info() {
         Ok(i) => i,
         Err(e) => {
             eprintln!("[backend] query_extended_limit_info failed: {e}");
             return None;
         }
     };
+    let mut info = info;
     info.limit_kill_on_job_close();
-    if let Err(e) = job.set_extended_limit_info(&mut info) {
+    if let Err(e) = job.set_extended_limit_info(&info) {
         eprintln!("[backend] set_extended_limit_info failed: {e}");
         return None;
     }
@@ -119,6 +152,10 @@ fn start_backend(app: &AppHandle) -> Result<BackendProcess, String> {
     println!("[backend] python_dir: {}", python_dir.display());
     println!("[backend] venv: {}", venv_dir.display());
 
+    let port = allocate_backend_port()?;
+    let port_arg = port.to_string();
+    println!("[backend] selected port: {port}");
+
     let child = std::process::Command::new(&uv)
         .env("UV_PROJECT_ENVIRONMENT", &venv_dir)
         .args([
@@ -128,7 +165,7 @@ fn start_backend(app: &AppHandle) -> Result<BackendProcess, String> {
             "--host",
             "127.0.0.1",
             "--port",
-            &FASTAPI_PORT.to_string(),
+            &port_arg,
             "--no-access-log",
         ])
         .current_dir(&python_dir)
@@ -137,16 +174,31 @@ fn start_backend(app: &AppHandle) -> Result<BackendProcess, String> {
 
     println!("[backend] FastAPI started (pid={})", child.id());
 
+    #[cfg(windows)]
+    let job = attach_job_object(&child);
+
     Ok(BackendProcess {
         child: Some(child),
+        port: Some(port),
         #[cfg(windows)]
-        _job: attach_job_object(&child),
+        _job: job,
     })
 }
 
 #[tauri::command]
-fn get_api_port() -> u16 {
-    FASTAPI_PORT
+fn get_api_port(state: tauri::State<BackendState>) -> Option<u16> {
+    let mut backend = state.lock().unwrap();
+    if refresh_backend_state(&mut backend) {
+        backend.port
+    } else {
+        None
+    }
+}
+
+#[tauri::command]
+fn is_backend_running(state: tauri::State<BackendState>) -> bool {
+    let mut backend = state.lock().unwrap();
+    refresh_backend_state(&mut backend)
 }
 
 #[tauri::command]
@@ -162,8 +214,11 @@ pub fn run() {
         .setup(|app| {
             match start_backend(app.handle()) {
                 Ok(backend) => {
+                    let running_port = backend.port;
                     *app.state::<BackendState>().lock().unwrap() = backend;
-                    println!("[backend] FastAPI is running on http://127.0.0.1:{FASTAPI_PORT}");
+                    if let Some(port) = running_port {
+                        println!("[backend] FastAPI is running on http://127.0.0.1:{port}");
+                    }
                 }
                 Err(e) => {
                     eprintln!("[backend] ERROR: {e}");
@@ -171,7 +226,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![greet, get_api_port])
+        .invoke_handler(tauri::generate_handler![greet, get_api_port, is_backend_running])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -4,20 +4,30 @@ import "./App.css";
 
 function App() {
   const [apiPort, setApiPort] = useState<number | null>(null);
+  const [backendRunning, setBackendRunning] = useState<boolean | null>(null);
   const [apiResponse, setApiResponse] = useState("");
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
 
   // アプリ起動時に FastAPI のポート番号を取得
   useEffect(() => {
-    invoke<number>("get_api_port").then(setApiPort);
+    invoke<number | null>("get_api_port")
+      .then(setApiPort)
+      .catch(() => setApiPort(null));
+
+    invoke<boolean>("is_backend_running")
+      .then(setBackendRunning)
+      .catch(() => setBackendRunning(false));
   }, []);
 
   async function callFastApi() {
-    if (!apiPort || !name) return;
+    if (apiPort === null || !name || backendRunning !== true) return;
     setLoading(true);
     try {
       const res = await fetch(`http://127.0.0.1:${apiPort}/hello/${encodeURIComponent(name)}`);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
       const data = await res.json();
       setApiResponse(data.message);
     } catch (e) {
@@ -33,10 +43,14 @@ function App() {
 
       <p>
         Backend status:{" "}
-        {apiPort ? (
-          <span style={{ color: "green" }}>Running on port {apiPort}</span>
+        {backendRunning === null ? (
+          <span style={{ color: "gray" }}>Checking...</span>
+        ) : backendRunning ? (
+          <span style={{ color: "green" }}>
+            {apiPort !== null ? `Running on port ${apiPort}` : "Running"}
+          </span>
         ) : (
-          <span style={{ color: "gray" }}>Loading...</span>
+          <span style={{ color: "red" }}>Failed to start backend</span>
         )}
       </p>
 
@@ -51,7 +65,7 @@ function App() {
           onChange={(e) => setName(e.currentTarget.value)}
           placeholder="Enter a name..."
         />
-        <button type="submit" disabled={loading || !apiPort}>
+        <button type="submit" disabled={loading || apiPort === null || backendRunning !== true}>
           {loading ? "..." : "Call FastAPI"}
         </button>
       </form>

@@ -20,7 +20,13 @@ if (Test-Path $DestPath) {
     exit 0
 }
 
-$Url = "https://github.com/astral-sh/uv/releases/download/$Version/uv-x86_64-pc-windows-msvc.zip"
+$Arch = $env:PROCESSOR_ARCHITECTURE
+switch ($Arch.ToUpperInvariant()) {
+    "ARM64" { $Triple = "aarch64-pc-windows-msvc" }
+    default { $Triple = "x86_64-pc-windows-msvc" }
+}
+
+$Url = "https://github.com/astral-sh/uv/releases/download/$Version/uv-$Triple.zip"
 $TmpZip = [System.IO.Path]::GetTempFileName() + ".zip"
 $TmpDir = [System.IO.Path]::GetTempPath() + [System.IO.Path]::GetRandomFileName()
 

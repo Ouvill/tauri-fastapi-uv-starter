@@ -22,6 +22,7 @@ fn ensure_uv() {
         Err(e) => {
             println!("cargo:warning=Failed to download uv: {e}");
             println!("cargo:warning=Please run manually: npm run setup");
+            panic!("uv bootstrap failed: {e}");
         }
     }
 }

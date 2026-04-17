@@ -4,14 +4,16 @@ Tauri + uv + FastAPI のサイドカーパターンのサンプルコード。
 
 Python を exe 化せず、uv バイナリをアプリに同梱することで依存関係を自動解決し、ユーザーが Python や pip を別途インストールしなくても動くデスクトップアプリを実現する。
 
+依存関係の再現性のため、`python/uv.lock` をコミットしておく。
+
 ## アーキテクチャ
 
 ```text
 Tauri アプリ
 ├── フロントエンド (React/Vite)
-│     └── fetch → http://127.0.0.1:8000
+│     └── fetch → http://127.0.0.1:<runtime_port>
 ├── Rust (lib.rs)
-│     └── 起動時に uv run uvicorn を spawn
+│     └── 起動時に空きポートを選び uv run uvicorn を spawn
 │         終了時に Job Object でプロセスツリーごと kill (Windows)
 └── リソース (同梱)
       ├── uv.exe / uv
@@ -51,6 +53,8 @@ npm run tauri build
 | アプリ終了時に FastAPI を確実に止めたい（macOS/Linux） | `Drop` トレイトで RAII パターン |
 | Windows で孫プロセス（python.exe）が残る | Windows Job Object で OS レベルのプロセスツリー kill |
 | プラットフォームごとに uv バイナリが異なる | `tauri.{platform}.conf.json` で分岐 |
+| 起動失敗時に UI で気付きにくい | `is_backend_running` コマンドで起動状態を表示 |
+| ポート競合が起きる | 起動時に `127.0.0.1:0` で空きポートを自動確保 |
 
 ## 参考
 
