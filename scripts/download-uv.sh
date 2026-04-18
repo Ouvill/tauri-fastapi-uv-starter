@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-UV_VERSION="${1:-0.6.14}"
+UV_VERSION="${1:-0.11.7}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOURCES_DIR="$SCRIPT_DIR/../src-tauri/resources"
 
@@ -43,10 +43,10 @@ esac
 ASSET_NAME="uv-$TRIPLE.tar.gz"
 BASE_URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION"
 URL="$BASE_URL/$ASSET_NAME"
-CHECKSUM_URL="$BASE_URL/SHA256SUMS"
+CHECKSUM_URL="$BASE_URL/$ASSET_NAME.sha256"
 TMP_DIR="$(mktemp -d)"
 TMP_ARCHIVE="$TMP_DIR/$ASSET_NAME"
-TMP_CHECKSUMS="$TMP_DIR/SHA256SUMS"
+TMP_CHECKSUMS="$TMP_DIR/$ASSET_NAME.sha256"
 
 echo "Downloading uv $UV_VERSION for $TRIPLE ..."
 curl -fsSL "$URL" -o "$TMP_ARCHIVE"
@@ -54,7 +54,7 @@ curl -fsSL "$URL" -o "$TMP_ARCHIVE"
 echo "Downloading checksums ..."
 curl -fsSL "$CHECKSUM_URL" -o "$TMP_CHECKSUMS"
 
-EXPECTED_HASH="$(grep "  $ASSET_NAME$" "$TMP_CHECKSUMS" | awk '{print $1}')"
+EXPECTED_HASH="$(awk '{print $1}' "$TMP_CHECKSUMS")"
 if [[ -z "$EXPECTED_HASH" ]]; then
     echo "Failed to find checksum entry for $ASSET_NAME"
     rm -rf "$TMP_DIR"
