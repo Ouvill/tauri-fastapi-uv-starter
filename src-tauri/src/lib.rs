@@ -1,15 +1,18 @@
-use std::process::Child;
 use std::sync::Mutex;
+use process_wrap::std::{CommandWrap, ChildWrapper};
+#[cfg(unix)]
+use process_wrap::std::ProcessGroup;
+#[cfg(windows)]
+use process_wrap::std::JobObject;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
-/// アプリ状態：FastAPI サブプロセスと（Windows では）Job Object を保持
+/// アプリ状態：FastAPI サブプロセスを保持。
+/// process-wrap により Unix はプロセスグループ、Windows は Job Object で
+/// 孫プロセスも含めたプロセスツリーを一括 kill する。
 pub struct BackendProcess {
-    child: Option<Child>,
+    child: Option<Box<dyn ChildWrapper + Send>>,
     port: Option<u16>,
-    /// ハンドルを保持し続けることで Drop 時に OS が KILL_ON_JOB_CLOSE を発火する
-    #[cfg(windows)]
-    _job: Option<win32job::Job>,
 }
 
 impl BackendProcess {
@@ -17,8 +20,6 @@ impl BackendProcess {
         BackendProcess {
             child: None,
             port: None,
-            #[cfg(windows)]
-            _job: None,
         }
     }
 }
@@ -29,8 +30,6 @@ impl Drop for BackendProcess {
             let _ = child.kill();
             let _ = child.wait();
         }
-        self.port = None;
-        // Windows: ここで _job が Drop → OS がプロセスツリー全体を kill
     }
 }
 
@@ -65,7 +64,6 @@ struct RuntimePaths {
     venv_dir: std::path::PathBuf,
 }
 
-/// uv バイナリのパスを返す（プラットフォーム別）
 fn uv_path(resource_dir: &std::path::Path) -> std::path::PathBuf {
     #[cfg(target_os = "windows")]
     return resource_dir.join("uv.exe");
@@ -73,7 +71,6 @@ fn uv_path(resource_dir: &std::path::Path) -> std::path::PathBuf {
     return resource_dir.join("uv");
 }
 
-/// 127.0.0.1 上の空きポートを動的に確保する。
 fn allocate_backend_port() -> Result<u16, String> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|e| format!("空きポート確保に失敗: {e}"))?;
@@ -173,46 +170,9 @@ fn ensure_python_environment(app: &AppHandle) -> Result<(), String> {
     }
 }
 
-/// Windows Job Object を作成して子プロセスをアタッチする。
-/// KILL_ON_JOB_CLOSE を設定することで、Tauri プロセスが終了すると
-/// OS がジョブ内の全プロセスを自動 kill する。
-#[cfg(windows)]
-fn attach_job_object(child: &Child) -> Option<win32job::Job> {
-    use std::os::windows::io::AsRawHandle;
-
-    let job = match win32job::Job::create() {
-        Ok(j) => j,
-        Err(e) => {
-            eprintln!("[backend] Job::create failed: {e}");
-            return None;
-        }
-    };
-
-    let info = match job.query_extended_limit_info() {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!("[backend] query_extended_limit_info failed: {e}");
-            return None;
-        }
-    };
-    let mut info = info;
-    info.limit_kill_on_job_close();
-    if let Err(e) = job.set_extended_limit_info(&info) {
-        eprintln!("[backend] set_extended_limit_info failed: {e}");
-        return None;
-    }
-
-    let raw = child.as_raw_handle() as isize;
-    if let Err(e) = job.assign_process(raw) {
-        eprintln!("[backend] assign_process failed: {e}");
-        return None;
-    }
-
-    println!("[backend] Job Object attached (KILL_ON_JOB_CLOSE, pid={})", child.id());
-    Some(job)
-}
-
-/// FastAPI サーバーを起動する
+/// FastAPI サーバーを起動する。
+/// Unix: ProcessGroup::leader() でプロセスグループを作成し、kill 時に孫まで一括終了。
+/// Windows: JobObject で同様のプロセスツリー kill を実現。
 fn start_backend(app: &AppHandle) -> Result<BackendProcess, String> {
     let paths = resolve_runtime_paths(app)?;
 
@@ -220,33 +180,36 @@ fn start_backend(app: &AppHandle) -> Result<BackendProcess, String> {
     let port_arg = port.to_string();
     println!("[backend] selected port: {port}");
 
-    let child = std::process::Command::new(&paths.uv)
-        .env("UV_PROJECT_ENVIRONMENT", &paths.venv_dir)
-        .args([
-            "run",
-            "--no-sync",
-            "uvicorn",
-            "main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &port_arg,
-            "--no-access-log",
-        ])
-        .current_dir(&paths.python_dir)
+    let mut wrap = CommandWrap::with_new(&paths.uv, |cmd| {
+        cmd.env("UV_PROJECT_ENVIRONMENT", &paths.venv_dir)
+            .args([
+                "run",
+                "--no-sync",
+                "uvicorn",
+                "main:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &port_arg,
+                "--no-access-log",
+            ])
+            .current_dir(&paths.python_dir);
+    });
+
+    #[cfg(unix)]
+    wrap.wrap(ProcessGroup::leader());
+    #[cfg(windows)]
+    wrap.wrap(JobObject);
+
+    let child = wrap
         .spawn()
         .map_err(|e| format!("FastAPI 起動失敗: {e}"))?;
 
     println!("[backend] FastAPI started (pid={})", child.id());
 
-    #[cfg(windows)]
-    let job = attach_job_object(&child);
-
     Ok(BackendProcess {
         child: Some(child),
         port: Some(port),
-        #[cfg(windows)]
-        _job: job,
     })
 }
 
@@ -317,6 +280,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![greet, get_api_port, is_backend_running, get_backend_bootstrap_status])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                let state = app_handle.state::<BackendState>();
+                let mut backend = state.lock().unwrap();
+                if let Some(mut child) = backend.child.take() {
+                    eprintln!("[backend] killing process group on exit...");
+                    let _ = child.kill();
+                }
+            }
+        });
 }
