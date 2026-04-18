@@ -2,7 +2,7 @@
 # Usage: pwsh -File scripts/download-uv.ps1
 
 param(
-    [string]$Version = "0.6.14"
+    [string]$Version = "0.11.7"
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,7 +29,7 @@ switch ($Arch.ToUpperInvariant()) {
 $AssetName = "uv-$Triple.zip"
 $BaseUrl = "https://github.com/astral-sh/uv/releases/download/$Version"
 $Url = "$BaseUrl/$AssetName"
-$ChecksumUrl = "$BaseUrl/SHA256SUMS"
+$ChecksumUrl = "$BaseUrl/$AssetName.sha256"
 $TmpZip = [System.IO.Path]::GetTempFileName() + ".zip"
 $TmpChecksums = [System.IO.Path]::GetTempFileName()
 $TmpDir = [System.IO.Path]::GetTempPath() + [System.IO.Path]::GetRandomFileName()
@@ -40,20 +40,20 @@ Invoke-WebRequest -Uri $Url -OutFile $TmpZip -UseBasicParsing
 Write-Host "Downloading checksums from $ChecksumUrl ..."
 Invoke-WebRequest -Uri $ChecksumUrl -OutFile $TmpChecksums -UseBasicParsing
 
-$ExpectedLine = Select-String -Path $TmpChecksums -Pattern ("\s" + [regex]::Escape($AssetName) + "$") | Select-Object -First 1
-if (-not $ExpectedLine) {
+$ChecksumContent = Get-Content $TmpChecksums -Raw
+if (-not $ChecksumContent) {
     Remove-Item $TmpZip -Force -ErrorAction SilentlyContinue
     Remove-Item $TmpChecksums -Force -ErrorAction SilentlyContinue
-    throw "Could not find checksum entry for $AssetName in SHA256SUMS"
+    throw "Could not read checksum file for $AssetName"
 }
 
-$ExpectedHash = ($ExpectedLine.Line -split "\s+")[0].ToLowerInvariant()
+$ExpectedHash = ($ChecksumContent -split "\s+")[0].ToLowerInvariant()
 $ActualHash = (Get-FileHash -Path $TmpZip -Algorithm SHA256).Hash.ToLowerInvariant()
 
 if ($ExpectedHash -ne $ActualHash) {
     Remove-Item $TmpZip -Force -ErrorAction SilentlyContinue
     Remove-Item $TmpChecksums -Force -ErrorAction SilentlyContinue
-    throw "SHA256 mismatch for $AssetName. expected=$ExpectedHash actual=$ActualHash"
+    throw "SHA256 mismatch for $AssetName`nexpected=$ExpectedHash`nactual=$ActualHash"
 }
 
 Write-Host "Checksum verified for $AssetName"
